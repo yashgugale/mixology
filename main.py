@@ -121,7 +121,7 @@ class IBACocktailScraper:
 
                 print(f"Found {len(page_links)} cocktails on page {page}")
                 page += 1
-                time.sleep(1)  # Be respectful to the server
+                time.sleep(0.5)  # Be respectful to the server
 
                 # If we only found a few links, we might be at the end
                 if len(page_links) < 5:
@@ -138,14 +138,6 @@ class IBACocktailScraper:
         if not raw_text:
             return None, None
 
-        # Remove common category names that might be attached
-        categories_to_remove = [
-            "The unforgettables",
-            "Contemporary Classics",
-            "New Era Drinks",
-            "The Unforgettables",
-        ]
-
         # Extract view count (pattern like "108.9K views" or "1.2M views")
         views_match = re.search(
             r"([0-9]+(?:\.[0-9]+)?[KM]?)\s*views?", raw_text, re.IGNORECASE
@@ -157,21 +149,48 @@ class IBACocktailScraper:
             r"[0-9]+(?:\.[0-9]+)?[KM]?\s*views?", "", raw_text, flags=re.IGNORECASE
         )
 
-        # Remove category names
-        for category in categories_to_remove:
-            clean_text = clean_text.replace(category, "")
+        # Remove common category names that might be attached (case-insensitive)
+        category_patterns = [
+            r"The\s+unforgettables?",
+            r"Contemporary\s+Classics?",
+            r"New\s+Era\s+Drinks?",
+            r"New\s+Era",  # Handle "New Era" without "Drinks"
+            r"The\s+Unforgettables?",
+            r"Unforgettables?",
+        ]
+
+        for pattern in category_patterns:
+            clean_text = re.sub(pattern, "", clean_text, flags=re.IGNORECASE)
 
         # Clean up extra whitespace and common separators
         clean_text = re.sub(r"[\s\-_]+", " ", clean_text).strip()
 
         # Remove any remaining non-alphabetic characters at the start/end
-        clean_text = re.sub(r"^[^a-zA-Z]+|[^a-zA-Z0-9\s]+$", "", clean_text).strip()
+        clean_text = re.sub(r"^[^a-zA-Z]+|[^a-zA-Z0-9\s']+$", "", clean_text).strip()
 
         # If the name is too short or empty after cleaning, return None
         if not clean_text or len(clean_text) < 2:
             return None, views
 
         return clean_text, views
+
+    def normalize_method_text(self, method_text):
+        """Normalize method text to have single newlines between steps"""
+        if not method_text:
+            return ""
+
+        # Split by any combination of newlines and whitespace
+        lines = re.split(r"\n+", method_text.strip())
+
+        # Clean each line and filter out empty ones
+        clean_lines = []
+        for line in lines:
+            line = line.strip()
+            if line:  # Only keep non-empty lines
+                clean_lines.append(line)
+
+        # Join with single newlines
+        return "\n".join(clean_lines)
 
     def extract_category(self, link_element):
         """Extract category from surrounding elements"""
@@ -253,7 +272,9 @@ class IBACocktailScraper:
                     line = line.strip()
                     if line and not line.lower().startswith(("glass", "garnish")):
                         clean_method_lines.append(line)
-                recipe["method"] = "\n\n".join(clean_method_lines)
+                recipe["method"] = self.normalize_method_text(
+                    "\n".join(clean_method_lines)
+                )
 
             # If no "Method", look for "Preparation"
             if not recipe["method"]:
@@ -270,7 +291,9 @@ class IBACocktailScraper:
                         line = line.strip()
                         if line and not line.lower().startswith(("glass", "garnish")):
                             clean_prep_lines.append(line)
-                    recipe["method"] = "\n\n".join(clean_prep_lines)
+                    recipe["method"] = self.normalize_method_text(
+                        "\n".join(clean_prep_lines)
+                    )
 
             # Extract garnish
             garnish_match = re.search(
@@ -537,6 +560,35 @@ class IBACocktailScraper:
             print(f"  Error downloading video for {cocktail_name}: {e}")
             return None
 
+    def download_media_for_recipes(self, recipes):
+        """Download media (images and videos) for a list of recipes"""
+        print("Setting up media folders...")
+        self.setup_media_folders()
+
+        updated_recipes = []
+        for recipe in recipes:
+            print(f"Downloading media for {recipe['name']}...")
+
+            # Create a copy of the recipe to avoid modifying the original
+            updated_recipe = recipe.copy()
+
+            # Download image and update path
+            if recipe.get("image"):
+                local_image_path = self.download_image(recipe["image"], recipe["name"])
+                if local_image_path:
+                    updated_recipe["local_image"] = local_image_path
+
+            # Download video and update path
+            if recipe.get("video"):
+                local_video_path = self.download_video(recipe["video"], recipe["name"])
+                if local_video_path:
+                    updated_recipe["local_video"] = local_video_path
+
+            updated_recipes.append(updated_recipe)
+
+        print(f"Completed media download for {len(recipes)} recipes")
+        return updated_recipes
+
     def scrape_all_recipes(
         self, output_format="json", max_cocktails=None, download_media=False
     ):
@@ -548,10 +600,6 @@ class IBACocktailScraper:
         if max_cocktails:
             cocktail_links = cocktail_links[:max_cocktails]
             print(f"Limiting to first {max_cocktails} cocktails")
-
-        # Setup media folders if downloading is enabled
-        if download_media:
-            self.setup_media_folders()
 
         recipes = []
         successful = 0
@@ -567,26 +615,6 @@ class IBACocktailScraper:
                 recipe["category"] = cocktail_info["category"]
                 recipe["views"] = cocktail_info.get("views")
 
-                # Download media if enabled
-                if download_media:
-                    print(f"  Downloading media for {cocktail_info['name']}...")
-
-                    # Download image and update path
-                    if recipe["image"]:
-                        local_image_path = self.download_image(
-                            recipe["image"], cocktail_info["name"]
-                        )
-                        if local_image_path:
-                            recipe["local_image"] = local_image_path
-
-                    # Download video and update path
-                    if recipe["video"]:
-                        local_video_path = self.download_video(
-                            recipe["video"], cocktail_info["name"]
-                        )
-                        if local_video_path:
-                            recipe["local_video"] = local_video_path
-
                 recipes.append(recipe)
                 successful += 1
                 print(f"  Successfully scraped {cocktail_info['name']}")
@@ -594,11 +622,16 @@ class IBACocktailScraper:
                 print(f"  Failed to scrape {cocktail_info['name']}")
 
             # Be respectful - add delay between requests
-            time.sleep(2)
+            time.sleep(1)
 
         print(
             f"\nSuccessfully scraped {successful}/{len(cocktail_links[:max_cocktails]) if max_cocktails else len(cocktail_links)} recipes"
         )
+
+        # Download media if enabled
+        if download_media:
+            print("\nDownloading media for all recipes...")
+            recipes = self.download_media_for_recipes(recipes)
 
         # Save results
         if output_format.lower() == "json":
@@ -638,7 +671,7 @@ def main():
     # Test with all cocktails to verify parsing
     print("Testing with all cocktails...")
     recipes = scraper.scrape_all_recipes(
-        output_format="json", max_cocktails=None, download_media=True
+        output_format="json", max_cocktails=None, download_media=False
     )
 
     if recipes:
